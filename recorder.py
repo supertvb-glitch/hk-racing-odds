@@ -411,6 +411,7 @@ def do_prerace(site, d, st):
                 print(f"  第 {race} 場 {cat} ✓（距開跑 {mins:.1f} 分鐘）")
     if append_rows(d, rows):
         push_now("、".join(done))
+    return done
 
 
 def overnight_log():
@@ -556,6 +557,10 @@ def need_browser(mode, now):
     t = hm(now)
     if mode in ("probe", "early", "trend", "prerace", "overnight"):
         return True
+    if mode == "auto" and not (st and st.get("race_day") and not st.get("results_done")):
+        import extras
+        if extras.idle_work_due(now):
+            return True  # 補錄賽果／第二日重讀
     if overnight_due(now):
         return True
     if t < hm(datetime(2000, 1, 1, *EARLY_FROM)):
@@ -586,6 +591,19 @@ def at(d, h, m):
 
 
 def plan_wake(site, now):
+    """加上：賽後第二日 10:00 重讀賽果；補錄未完就即刻再行。"""
+    import extras
+    cands = [_plan_wake(site, now)]
+    st = load_state(now.date())
+    if st and st.get("race_day") and st.get("results_done") and not st.get("recheck_done"):
+        cands.append(at(now.date() + timedelta(days=1), 10, 0))
+    if extras.backfill_pending():
+        cands.append(now + timedelta(minutes=1))
+    cands = [c for c in cands if c is not None]
+    return min(cands) if cands else None
+
+
+def _plan_wake(site, now):
     """決定下一次要喺幾時執行（香港時間）；唔使就回傳 None。
     賽馬日未完：即刻接力。聽日係賽馬日：等到今晚 22:00／23:00（隔夜）或者聽日 10:50（早段）。"""
     d = now.date()
@@ -694,6 +712,11 @@ def main():
         t = hm(now)
         if mode == "early" or (mode == "auto" and hm(datetime(2000, 1, 1, *EARLY_FROM)) <= t < hm(datetime(2000, 1, 1, *EARLY_UNTIL))):
             do_early(site, d, st)
+        if mode == "auto":
+            import extras
+            tag = extras.info_due(st, d, now_hkt())
+            if tag == "10:50":
+                extras.snapshot_info(site, d, st, tag)
         if mode == "auto" and t >= hm(datetime(2000, 1, 1, *EARLY_FROM)) and not st.get("card_done"):
             import racecard
             racecard.do_card(d, st["code"])
@@ -702,8 +725,14 @@ def main():
             push_now("排位表完成")
         if mode == "prerace" or (mode == "auto" and t >= hm(datetime(2000, 1, 1, *EARLY_FROM))):
             start = now_hkt()
+            import extras
             while True:
-                do_prerace(site, d, st)
+                done = do_prerace(site, d, st)
+                if mode == "auto":
+                    tag = extras.info_due(st, d, now_hkt())
+                    if tag:
+                        extras.snapshot_info(site, d, st, tag)
+                    extras.fire_routine(st, [x[1:x.index("場")] for x in done if x.endswith("開跑前10")])
                 if not st.get("trend_done") and trend_due(st, d, now_hkt()):
                     if hm(now_hkt()) >= hm(datetime(2000, 1, 1, *TREND_DEADLINE)):
                         raise RuntimeError("已經太接近午夜，未能記錄走勢")
@@ -732,6 +761,10 @@ def main():
     finally:
         failed = sys.exc_info()[0] is not None
         if mode == "auto" and not failed:
+            cur = load_state(d)
+            if not (cur and cur.get("race_day") and not cur.get("results_done")):
+                import extras
+                extras.idle_work(now_hkt())
             try:
                 wake = plan_wake(site, now_hkt())
             except Exception as e:  # noqa: BLE001
