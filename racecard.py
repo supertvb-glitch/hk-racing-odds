@@ -70,11 +70,14 @@ def fetch(url, marker):
     if marker in html:
         return html
     print(f"  requests 讀到嘅頁面冇「{marker}」，改用 Playwright：{url}")
-    if _pw is None:
-        _pw = R.Site()
+    site = R.CURRENT_SITE
+    if site is None:
+        if _pw is None:
+            _pw = R.Site()
+        site = _pw
     time.sleep(random.uniform(1.0, 2.0))
-    _pw.page.goto(url, wait_until="networkidle")
-    html = _pw.page.content()
+    site.page.goto(url, wait_until="networkidle")
+    html = site.page.content()
     if marker not in html:
         raise RuntimeError(f"讀唔到 {url}（頁面冇「{marker}」）")
     return html

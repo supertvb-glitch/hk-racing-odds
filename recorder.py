@@ -215,6 +215,9 @@ def push_now(msg):
 
 
 # ---------- 讀網頁 ----------
+CURRENT_SITE = None
+
+
 class Site:
     def __init__(self):
         from playwright.sync_api import sync_playwright
@@ -222,8 +225,14 @@ class Site:
         self.browser = self._pw.chromium.launch(headless=True)
         self.page = self.browser.new_page(locale="zh-HK", timezone_id="Asia/Hong_Kong")
         self.page.set_default_timeout(45000)
+        global CURRENT_SITE
+        CURRENT_SITE = self  # racecard.fetch 後備時共用呢個瀏覽器，唔再開第二個
+
 
     def close(self):
+        global CURRENT_SITE
+        if CURRENT_SITE is self:
+            CURRENT_SITE = None
         self.browser.close()
         self._pw.stop()
 
@@ -597,7 +606,7 @@ def plan_wake(site, now):
     st = load_state(now.date())
     if st and st.get("race_day") and st.get("results_done") and not st.get("recheck_done"):
         cands.append(at(now.date() + timedelta(days=1), 10, 0))
-    if extras.backfill_pending():
+    if extras.backfill_pending() and not (st and st.get("race_day") and not st.get("results_done")):
         cands.append(now + timedelta(minutes=1))
     cands = [c for c in cands if c is not None]
     return min(cands) if cands else None
