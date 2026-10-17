@@ -71,6 +71,9 @@ jobs:
         if: >-
           (github.event_name == 'schedule' && steps.need.outputs.need == 'true') ||
           (github.event_name == 'workflow_dispatch' && contains(fromJSON('["probe","auto","overnight","early","prerace","trend"]'), inputs.mode))
+        env:
+          ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
         run: python recorder.py ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
 
       - name: 手動記錄排位表／賽果
