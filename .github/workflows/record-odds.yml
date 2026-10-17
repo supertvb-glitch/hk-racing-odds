@@ -1,0 +1,93 @@
+name: 記錄賠率
+
+on:
+  schedule:
+    # GitHub cron 用 UTC。香港時間 = UTC + 8。GitHub 定時執行經常延遲或者漏咗，
+    # 所以賽馬日一開始執行，程式會自己等時間點，並自動觸發下一次執行直至記錄完賽果。
+    - cron: '50 2 * * *'          # 香港 10:50
+    - cron: '30-55/5 3 * * *'     # 香港 11:30–11:55 每 5 分鐘
+    - cron: '*/5 4-15 * * *'      # 香港 12:00–23:55 每 5 分鐘（22:00、23:00 會試記錄聽日隔夜賠率）
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '模式：probe=測試賠率頁；auto=同定時執行一樣；card / results 要填日期同場地'
+        type: choice
+        default: auto
+        options: [auto, probe, overnight, early, prerace, trend, card, results]
+      date:
+        description: '日期 YYYY/MM/DD（card / results 用）'
+        type: string
+        default: ''
+      venue:
+        description: '場地（card / results 用）'
+        type: choice
+        default: HV
+        options: [HV, ST]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: record-odds
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04   # 固定版本，避免 ubuntu-latest 轉 Ubuntu 26 後 Playwright 裝唔到
+    timeout-minutes: 345
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取私人數據 repo（放喺 data/）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hk-racing-data
+          token: ${{ secrets.DATA_TOKEN }}
+          path: data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 判斷今次需唔需要做嘢
+        id: need
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python recorder.py need
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 安裝套件
+        if: steps.need.outputs.need == 'true'
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 讀取賠率（賽馬日亦會記錄排位表、往績、賽果同派彩）
+        if: >-
+          (github.event_name == 'schedule' && steps.need.outputs.need == 'true') ||
+          (github.event_name == 'workflow_dispatch' && contains(fromJSON('["probe","auto","overnight","early","prerace","trend"]'), inputs.mode))
+        run: python recorder.py ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
+
+      - name: 手動記錄排位表／賽果
+        if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["card","results"]'), inputs.mode)
+        run: python racecard.py ${{ inputs.mode }} ${{ inputs.date }} ${{ inputs.venue }}
+
+      - name: Commit 新資料去私人數據 repo
+        if: always() && steps.need.outputs.need == 'true'
+        run: |
+          cd data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A .
+          if git diff --cached --quiet; then echo "冇新資料"; exit 0; fi
+          git commit -m "賠率記錄 $(TZ=Asia/Hong_Kong date '+%Y/%m/%d %H:%M') HKT"
+          for i in 1 2 3; do
+            git pull --rebase --autostash -q && git push -q && exit 0
+            sleep 5
+          done
+          exit 1
