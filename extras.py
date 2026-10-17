@@ -90,11 +90,12 @@ def snapshot_info(site, d, st, tag):
                    for n, c in ch if (str(n), c) not in seen]
             rc.append_csv(p, CHANGE_COLS, new)
             print(f"  更易事項 {tag}：{len(ch)} 項，新增 {len(new)} 項")
-        done.append(tag)
-        R.save_state(d, st)
         R.push_now(f"更易事項及場地 {tag}")
     except Exception as e:  # noqa: BLE001
         R.log_issue("更易事項/天氣場地", f"{ds} {tag}", f"讀取出錯：{e!r}"[:200])
+    finally:
+        done.append(tag)  # 每個時間點只試一次
+        R.save_state(d, st)
 
 
 def info_due(st, d, now):
@@ -124,15 +125,26 @@ def recheck_target(now):
 
 
 def recheck(d):
-    rc = _rc()
+    """只試一次：出錯都當做咗，費事每次執行都重試。"""
     st = R.load_state(d)
+    st["recheck_done"] = True
+    R.save_state(d, st)
+    _recheck(d, dict(st))
+
+
+def _recheck(d, st):
+    rc = _rc()
     ds, venue, code = st["date"], st["venue"], st["code"]
     p_res, p_div = rc.season_file(d, "賽果"), rc.season_file(d, "派彩")
     have_res = {(r["場次"], r["馬號"], r["馬名"]) for r in rc.read_csv(p_res) if r["日期"] == ds}
     have_div = {(r["場次"], r["彩池"], r["勝出組合"]) for r in rc.read_csv(p_div) if r["日期"] == ds}
     add_res, add_div = [], []
     for n in st["races"]:
-        html = rc.fetch(rc.results_url(d, code, n), "名次")
+        try:
+            html = rc.fetch(rc.results_url(d, code, n), "名次")
+        except Exception as e:  # noqa: BLE001
+            R.log_issue("賽果/派彩", f"{ds} 第{n}場", f"第二日重讀讀唔到：{e!r}"[:200])
+            continue
         info, rows = rc.parse_results(html, n, d, venue)
         divs = rc.parse_dividends(html)
         ts = rc.stamp()
@@ -146,8 +158,6 @@ def recheck(d):
     rc.append_csv(p_div, rc.DIV_COLS, add_div)
     if add_res or add_div:
         R.log_issue("賽果/派彩", ds, f"第二日重讀補返 賽果 {len(add_res)} 行、派彩 {len(add_div)} 行")
-    st["recheck_done"] = True
-    R.save_state(d, st)
     R.push_now(f"重讀賽果 {ds}")
     print(f"重讀 {ds} 賽果：補返賽果 {len(add_res)} 行、派彩 {len(add_div)} 行")
 
@@ -165,15 +175,25 @@ def backfill():
     data = json.loads(BACKFILL.read_text(encoding="utf-8"))
     start = R.now_hkt()
     while data.get("pending") and R.now_hkt() < start + timedelta(minutes=BACKFILL_MINUTES):
-        item = data["pending"][0]
+        item = data["pending"].pop(0)  # 先移走，出錯都唔會無限重試
+        BACKFILL.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         ds, code = item.split(":")
         d = datetime.strptime(ds, "%Y/%m/%d").date()
         print(f"補錄 {ds} {code} 賽果…")
-        rc.do_results(d, code, range(1, 12))
+        for n in range(1, 15):
+            have = {r["場次"] for r in rc.read_csv(rc.season_file(d, "賽果")) if r["日期"] == ds}
+            if str(n) in have:
+                continue
+            try:
+                rc.do_results(d, code, [n])
+            except Exception as e:  # noqa: BLE001
+                print(f"  第 {n} 場讀唔到，當呢日完結：{e!r}"[:200])
+                break
+            if str(n) not in {r["場次"] for r in rc.read_csv(rc.season_file(d, "賽果")) if r["日期"] == ds}:
+                break  # 冇呢場（已經過咗尾場）
         got = {r["場次"] for r in rc.read_csv(rc.season_file(d, "賽果")) if r["日期"] == ds}
         if not got:
             R.log_issue("賽果", ds, f"補錄讀唔到任何賽果（{code}）")
-        data["pending"].pop(0)
         data.setdefault("done", []).append(f"{item}:{len(got)}場")
         BACKFILL.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         R.push_now(f"補錄賽果 {ds}")
