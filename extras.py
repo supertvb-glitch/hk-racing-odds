@@ -225,8 +225,15 @@ def idle_work(now):
 
 # ---------- 通知 Claude 排程 ----------
 def fire_routine(st, races):
-    url, token = os.environ.get("ROUTINE_FIRE_URL"), os.environ.get("ROUTINE_FIRE_TOKEN")
+    url_raw, tok_raw = os.environ.get("ROUTINE_FIRE_URL", ""), os.environ.get("ROUTINE_FIRE_TOKEN", "")
+    # Secret 有時會連成段 curl 指令一齊貼咗入去：只抽出網址同 token 本身
+    m = re.search(r"https://\S+?/fire", url_raw) or re.search(r"https://\S+?/fire", tok_raw)
+    url = m.group(0) if m else url_raw.strip()
+    m = re.search(r"sk-ant-[A-Za-z0-9_\-]+", tok_raw)
+    token = m.group(0) if m else tok_raw.strip()
     if not url or not token or not races:
+        if races:
+            R.log_issue("Claude排程", st["date"], "冇設定通知網址或者 token")
         return
     import requests
     for race in races:
@@ -239,4 +246,4 @@ def fire_routine(st, races):
             if r.status_code >= 300:
                 R.log_issue("Claude排程", f"{st['date']} 第{race}場", f"通知失敗 HTTP {r.status_code}")
         except Exception as e:  # noqa: BLE001
-            R.log_issue("Claude排程", f"{st['date']} 第{race}場", f"通知出錯：{e!r}"[:200])
+            R.log_issue("Claude排程", f"{st['date']} 第{race}場", f"通知出錯：{type(e).__name__}")  # 唔記錄內容，費事露出 token
