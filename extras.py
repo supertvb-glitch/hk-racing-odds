@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta
 
 import recorder as R
@@ -224,26 +225,108 @@ def idle_work(now):
 
 
 # ---------- 通知 Claude 排程 ----------
+_HDR_OK = re.compile(r"^[\x21-\x7e]+(?: [\x21-\x7e]+)*$")  # HTTP header 值：只准可見 ASCII，中間最多單個空格
+
+
+def _clean_secret(raw, kind):
+    """由 secret 抽出網址或者 token。回傳 (值, 問題)；問題唔會包含 secret 內容。"""
+    raw = (raw or "").strip().strip("'\"").strip()
+    if not raw:
+        return "", "未設定"
+    if kind == "url":
+        m = re.search(r"https://[\x21-\x7e]+?/fire\b", raw)
+        val = m.group(0) if m else raw
+    else:
+        # 有人會連成段 curl 指令貼入去：先搵 sk-ant- token，再搵 Bearer 後面嗰段
+        m = re.search(r"sk-ant-[A-Za-z0-9_\-]{10,}", raw) or re.search(r"Bearer\s+([\x21-\x7e]+)", raw)
+        val = (m.group(1) if m and m.re.groups else m.group(0)) if m else raw
+        val = val.strip().strip("'\"")
+    if any(c in val for c in "\r\n\t") or not val.isascii() or " " in val:
+        why = []
+        if any(c in val for c in "\r\n"):
+            why.append("有換行")
+        if " " in val or "\t" in val:
+            why.append("有空白")
+        if not val.isascii():
+            why.append("有非 ASCII 字元")
+        return "", f"格式唔啱（{'、'.join(why)}，長度 {len(raw)}）"
+    if kind == "url" and not val.startswith("https://"):
+        return "", f"唔係 https 網址（長度 {len(raw)}）"
+    if kind == "token" and val.lower() in {"token", "your_token", "$token", "<token>"}:
+        return "", "似係範例文字，唔係真 token"
+    return val, ""
+
+
+def _headers(token):
+    h = {"Authorization": f"Bearer {token}", "anthropic-beta": "experimental-cc-routine-2026-04-01",
+         "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+    bad = [k for k, v in h.items() if not _HDR_OK.match(v)]
+    return h, bad
+
+
 def fire_routine(st, races):
-    url_raw, tok_raw = os.environ.get("ROUTINE_FIRE_URL", ""), os.environ.get("ROUTINE_FIRE_TOKEN", "")
-    # Secret 有時會連成段 curl 指令一齊貼咗入去：只抽出網址同 token 本身
-    m = re.search(r"https://\S+?/fire", url_raw) or re.search(r"https://\S+?/fire", tok_raw)
-    url = m.group(0) if m else url_raw.strip()
-    m = re.search(r"sk-ant-[A-Za-z0-9_\-]+", tok_raw)
-    token = m.group(0) if m else tok_raw.strip()
-    if not url or not token or not races:
-        if races:
-            R.log_issue("Claude排程", st["date"], "冇設定通知網址或者 token")
+    """每場「開跑前10」記錄完之後通知 Claude 排程。任何錯誤只寫入記錄日誌，唔會影響數據記錄。"""
+    if not races:
         return
-    import requests
+    try:
+        url, why_u = _clean_secret(os.environ.get("ROUTINE_FIRE_URL", ""), "url")
+        token, why_t = _clean_secret(os.environ.get("ROUTINE_FIRE_TOKEN", ""), "token")
+        if why_u or why_t:
+            msg = "、".join(x for x in [f"通知網址{why_u}" if why_u else "", f"token {why_t}" if why_t else ""] if x)
+            R.log_issue("Claude排程", f"{st['date']} 第{','.join(map(str, races))}場", f"冇發通知：{msg}")
+            return
+        headers, bad = _headers(token)
+        if bad:
+            R.log_issue("Claude排程", st["date"], f"冇發通知：header {','.join(bad)} 有唔准用嘅字元")
+            return
+        import requests
+    except Exception as e:  # noqa: BLE001
+        R.log_issue("Claude排程", st.get("date", ""), f"通知準備出錯：{type(e).__name__}")
+        return
     for race in races:
+        # 中文內容只放喺 JSON body（UTF-8），唔會入 header
         text = f"{st['date']} {st['venue']}（{st['code']}）第 {race} 場 開跑前10 賠率已經記錄。"
         try:
-            r = requests.post(url, timeout=30, json={"text": text}, headers={
-                "Authorization": f"Bearer {token}", "anthropic-beta": "experimental-cc-routine-2026-04-01",
-                "anthropic-version": "2023-06-01", "Content-Type": "application/json"})
+            r = requests.post(url, timeout=30, json={"text": text}, headers=headers)
             print(f"  已通知 Claude 排程：第 {race} 場（HTTP {r.status_code}）")
             if r.status_code >= 300:
                 R.log_issue("Claude排程", f"{st['date']} 第{race}場", f"通知失敗 HTTP {r.status_code}")
         except Exception as e:  # noqa: BLE001
             R.log_issue("Claude排程", f"{st['date']} 第{race}場", f"通知出錯：{type(e).__name__}")  # 唔記錄內容，費事露出 token
+
+
+def _selftest():
+    """用假 token 測試：只砌 request、唔會真係發出，亦唔會印出 token。"""
+    import requests
+    fake = "sk-ant-oat01-FAKEFAKEFAKE_test-123"
+    url = "https://api.anthropic.com/v1/claude_code/routines/trig_TEST/fire"
+    cases = {
+        "乾淨 token": fake,
+        "前後有換行空白": f"\n  {fake}  \r\n",
+        "連 curl 指令貼入": f"curl -X POST {url} \\\n  -H 'Authorization: Bearer {fake}' \\\n  -H 'anthropic-beta: x'",
+        "curl 但冇 token": f"curl -X POST {url} \\\n  -H 'Authorization: Bearer YOUR_TOKEN \\\n'",
+        "有中文": "令牌 abc",
+    }
+    ok = True
+    for name, raw in cases.items():
+        tok, why = _clean_secret(raw, "token")
+        if why:
+            print(f"  {name}：唔發，原因「{why}」")
+            ok &= name in {"curl 但冇 token", "有中文"}
+            continue
+        h, bad = _headers(tok)
+        try:
+            requests.Request("POST", url, headers=h, json={"text": "2026/10/21 跑馬地（HV）第 1 場 開跑前10 賠率已經記錄。"}).prepare()
+            print(f"  {name}：header 合格，token 長度 {len(tok)}，同假 token 一樣：{tok == fake}")
+            ok &= tok == fake and not bad
+        except Exception as e:  # noqa: BLE001
+            print(f"  {name}：{type(e).__name__}")
+            ok = False
+    u, why = _clean_secret(f"  {url}\n", "url")
+    print(f"  網址前後有空白換行：{'合格' if u == url else why}")
+    print("自我測試：" + ("全部通過" if ok and u == url else "有問題"))
+    return ok
+
+
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+    sys.exit(0 if _selftest() else 1)
