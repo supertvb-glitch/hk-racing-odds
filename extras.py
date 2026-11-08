@@ -328,5 +328,30 @@ def _selftest():
     return ok
 
 
+def fire_test():
+    """手動測試：發一個「連線測試」去 Claude 排程，只印 HTTP 狀態，唔印 token。"""
+    url, why_u = _clean_secret(os.environ.get("ROUTINE_FIRE_URL", ""), "url")
+    token, why_t = _clean_secret(os.environ.get("ROUTINE_FIRE_TOKEN", ""), "token")
+    if why_u or why_t:
+        print(f"冇發：通知網址{why_u or '正常'}；token {why_t or '正常'}")
+        return False
+    headers, bad = _headers(token)
+    if bad:
+        print(f"冇發：header {','.join(bad)} 有唔准用嘅字元")
+        return False
+    import requests
+    try:
+        r = requests.post(url, timeout=30, json={"text": "連線測試（唔係賽事通知）"}, headers=headers)
+    except Exception as e:  # noqa: BLE001
+        print(f"發送出錯：{type(e).__name__}")
+        return False
+    msg = {200: "成功", 401: "token 唔啱或者已作廢", 403: "冇權限", 404: "網址唔啱"}.get(r.status_code, "")
+    print(f"測試結果：HTTP {r.status_code} {msg}（token 長度 {len(token)}）")
+    return r.status_code < 300
+
+
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--selftest":
     sys.exit(0 if _selftest() else 1)
+
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--firetest":
+    sys.exit(0 if fire_test() else 1)
