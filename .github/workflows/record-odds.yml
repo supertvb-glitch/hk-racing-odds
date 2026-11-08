@@ -10,10 +10,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '模式：probe=測試賠率頁；auto=同定時執行一樣；card / results 要填日期同場地'
+        description: '模式：firetest=測試通知 Claude 排程；probe=測試賠率頁；auto=同定時執行一樣；card / results 要填日期同場地'
         type: choice
         default: auto
-        options: [auto, probe, overnight, early, prerace, trend, card, results]
+        options: [auto, probe, overnight, early, prerace, trend, card, results, firetest]
       date:
         description: '日期 YYYY/MM/DD（card / results 用）'
         type: string
@@ -61,8 +61,17 @@ jobs:
             echo "need=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 測試通知 Claude 排程（只印 HTTP 狀態）
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'firetest'
+        env:
+          ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+        run: |
+          pip install -q requests
+          python extras.py --firetest
+
       - name: 安裝套件
-        if: steps.need.outputs.need == 'true'
+        if: steps.need.outputs.need == 'true' && inputs.mode != 'firetest'
         run: |
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
