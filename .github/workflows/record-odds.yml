@@ -29,7 +29,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: record-odds
+  # 測試通知用獨立 group，唔使等記錄中嘅 run；其他照舊共用 record-odds
+  group: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'firetest') && 'record-odds-firetest' || 'record-odds' }}
   cancel-in-progress: false
 
 jobs:
